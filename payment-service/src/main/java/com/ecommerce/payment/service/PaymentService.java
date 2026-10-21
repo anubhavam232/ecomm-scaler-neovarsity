@@ -7,7 +7,13 @@ import com.ecommerce.common.security.JwtTokenProvider;
 import com.ecommerce.payment.dto.PaymentDtos.ManualPaymentRequest;
 import com.ecommerce.payment.dto.PaymentDtos.PaymentReceiptResponse;
 import com.ecommerce.payment.entity.PaymentTransaction;
+import com.ecommerce.payment.exception.InvalidPaymentException;
+import com.ecommerce.payment.exception.PaymentNotFoundException;
+import com.ecommerce.payment.exception.PaymentProcessingException;
 import com.ecommerce.payment.repository.PaymentTransactionRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataAccessException;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
@@ -19,6 +25,8 @@ import java.util.UUID;
 
 @Service
 public class PaymentService {
+    private static final Logger logger = LoggerFactory.getLogger(PaymentService.class);
+
     private static final Set<String> SUPPORTED_METHODS = Set.of(
             "CREDIT_CARD", "DEBIT_CARD", "ONLINE_BANKING", "NET_BANKING", "UPI", "WALLET"
     );
@@ -34,15 +42,22 @@ public class PaymentService {
     // HLD 3.5 & Typical Flow Part 3: Consumes OrderPlacedEvent from Kafka to process payment automatically
     @KafkaListener(topics = KafkaTopics.ORDER_EVENTS, groupId = "payment-service-group")
     public void onOrderPlaced(OrderPlacedEvent event) {
-        processOrderPayment(
-                event.orderId(),
-                event.orderNumber(),
-                event.userId(),
-                event.userEmail(),
-                event.totalAmount(),
-                event.paymentMethod(),
-                event.paymentInstrumentDetails()
-        );
+        try {
+            logger.info("Processing payment for order: {}", event.orderNumber());
+            processOrderPayment(
+                    event.orderId(),
+                    event.orderNumber(),
+                    event.userId(),
+                    event.userEmail(),
+                    event.totalAmount(),
+                    event.paymentMethod(),
+                    event.paymentInstrumentDetails()
+            );
+            logger.info("Payment processed successfully for order: {}", event.orderNumber());
+        } catch (Exception e) {
+            logger.error("Failed to process payment for order: {}", event.orderNumber(), e);
+            throw new PaymentProcessingException("Failed to process payment for order: " + event.orderNumber(), e);
+        }
     }
 
     // PRD 5.1 Multiple Payment Options & 5.2 Secure Transactions
@@ -55,12 +70,34 @@ public class PaymentService {
             String paymentMethod,
             String instrumentDetails
     ) {
+        // Validate input parameters
+        if (orderId == null || orderId <= 0) {
+            throw new InvalidPaymentException("Order ID must be a positive number");
+        }
+        if (orderNumber == null || orderNumber.isBlank()) {
+            throw new InvalidPaymentException("Order number is required");
+        }
+        if (userId == null || userId <= 0) {
+            throw new InvalidPaymentException("User ID must be a positive number");
+        }
+        if (userEmail == null || userEmail.isBlank()) {
+            throw new InvalidPaymentException("User email is required");
+        }
+        if (amount <= 0) {
+            throw new InvalidPaymentException("Payment amount must be greater than zero");
+        }
+
         String normalizedMethod = paymentMethod == null ? "CREDIT_CARD" : paymentMethod.toUpperCase();
+
+        // Validate payment method
+        if (!SUPPORTED_METHODS.contains(normalizedMethod)) {
+            throw new InvalidPaymentException("Unsupported payment method: " + paymentMethod + ". Supported methods: " + SUPPORTED_METHODS);
+        }
+
         String txnId = "TXN-" + UUID.randomUUID().toString().substring(0, 12).toUpperCase();
         String receiptNo = "RCPT-" + System.currentTimeMillis() + "-" + orderId;
 
-        boolean validMethod = SUPPORTED_METHODS.contains(normalizedMethod) && amount > 0;
-        String status = validMethod ? "SUCCESS" : "FAILED";
+        String status = "SUCCESS";
         String masked = maskPaymentInstrument(normalizedMethod, instrumentDetails);
         String gateway = resolveGateway(normalizedMethod);
         String signature = JwtTokenProvider.hashPassword(
@@ -83,7 +120,14 @@ public class PaymentService {
         txn.setCryptographicSignature(signature);
         txn.setProcessedAt(Instant.now().toString());
 
-        PaymentTransaction saved = paymentRepository.save(txn);
+        PaymentTransaction saved;
+        try {
+            saved = paymentRepository.save(txn);
+            logger.info("Payment transaction saved: {} for order: {}", txnId, orderNumber);
+        } catch (DataAccessException e) {
+            logger.error("Failed to save payment transaction for order: {}", orderNumber, e);
+            throw new PaymentProcessingException("Failed to save payment transaction", e);
+        }
 
         // HLD 3.5: "Once the payment is confirmed, it produces a message on Kafka to notify the Order Management Service."
         PaymentCompletedEvent completedEvent = new PaymentCompletedEvent(
@@ -100,28 +144,55 @@ public class PaymentService {
                 saved.getCryptographicSignature(),
                 saved.getProcessedAt()
         );
-        kafkaTemplate.send(KafkaTopics.PAYMENT_EVENTS, saved.getOrderNumber(), completedEvent);
+
+        try {
+            kafkaTemplate.send(KafkaTopics.PAYMENT_EVENTS, saved.getOrderNumber(), completedEvent);
+            logger.info("Payment completed event published for order: {}", saved.getOrderNumber());
+        } catch (Exception e) {
+            logger.error("Failed to publish payment completed event for order: {}", saved.getOrderNumber(), e);
+            // Don't throw exception here - payment is already saved, just log the error
+        }
 
         return saved;
     }
 
     public PaymentReceiptResponse processManualPayment(ManualPaymentRequest req) {
-        PaymentTransaction txn = processOrderPayment(
-                req.orderId(),
-                req.orderNumber(),
-                req.userId(),
-                req.userEmail(),
-                req.amount(),
-                req.paymentMethod(),
-                req.instrumentDetails()
-        );
-        return toReceipt(txn);
+        if (req == null) {
+            throw new InvalidPaymentException("Payment request cannot be null");
+        }
+
+        logger.info("Processing manual payment for order: {}", req.orderNumber());
+
+        try {
+            PaymentTransaction txn = processOrderPayment(
+                    req.orderId(),
+                    req.orderNumber(),
+                    req.userId(),
+                    req.userEmail(),
+                    req.amount(),
+                    req.paymentMethod(),
+                    req.instrumentDetails()
+            );
+            return toReceipt(txn);
+        } catch (InvalidPaymentException | PaymentProcessingException e) {
+            throw e; // Re-throw known exceptions
+        } catch (Exception e) {
+            logger.error("Unexpected error processing manual payment for order: {}", req.orderNumber(), e);
+            throw new PaymentProcessingException("Unexpected error processing payment", e);
+        }
     }
 
     // PRD 5.3 Payment Receipt by Order ID
     public PaymentReceiptResponse getReceiptByOrderId(Long orderId) {
+        if (orderId == null || orderId <= 0) {
+            throw new InvalidPaymentException("Order ID must be a positive number");
+        }
+
+        logger.info("Retrieving payment receipt for order ID: {}", orderId);
+
         PaymentTransaction txn = paymentRepository.findByOrderId(orderId)
-                .orElseThrow(() -> new IllegalArgumentException("No payment receipt found for orderId: " + orderId));
+                .orElseThrow(() -> new PaymentNotFoundException(orderId));
+
         return toReceipt(txn);
     }
 
