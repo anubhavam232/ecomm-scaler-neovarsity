@@ -3,6 +3,9 @@ package com.ecommerce.cart.service;
 import com.ecommerce.cart.document.Cart;
 import com.ecommerce.cart.document.CartItem;
 import com.ecommerce.cart.dto.CartDtos.AddCartItemRequest;
+import com.ecommerce.cart.exception.CartItemNotFoundException;
+import com.ecommerce.cart.exception.CartNotFoundException;
+import com.ecommerce.cart.exception.InvalidCartOperationException;
 import com.ecommerce.cart.repository.CartRepository;
 import com.ecommerce.common.events.CartUpdatedEvent;
 import com.ecommerce.common.events.KafkaTopics;
@@ -52,7 +55,7 @@ public class CartService {
     // PRD 3.1 Add to Cart + HLD Part 2 Flow: Persist to MongoDB, Update Redis Cache, Publish Kafka Event
     public Cart addItem(Long userId, AddCartItemRequest req) {
         if (req.quantity() <= 0) {
-            throw new IllegalArgumentException("Item quantity must be positive");
+            throw new InvalidCartOperationException("Item quantity must be positive");
         }
         Cart cart = cartRepository.findByUserId(userId).orElseGet(() -> new Cart(userId));
         Optional<CartItem> existing = cart.getItems().stream()
@@ -97,14 +100,14 @@ public class CartService {
 
     public Cart updateItemQuantity(Long userId, Long productId, int quantity) {
         Cart cart = cartRepository.findByUserId(userId)
-                .orElseThrow(() -> new IllegalArgumentException("Cart not found for user: " + userId));
+                .orElseThrow(() -> new CartNotFoundException(userId));
         if (quantity <= 0) {
             return removeItem(userId, productId);
         }
         CartItem item = cart.getItems().stream()
                 .filter(i -> i.getProductId().equals(productId))
                 .findFirst()
-                .orElseThrow(() -> new IllegalArgumentException("Product not in cart: " + productId));
+                .orElseThrow(() -> new CartItemNotFoundException(productId));
         item.setQuantity(quantity);
         cart.recalculateTotals();
         Cart saved = cartRepository.save(cart);
@@ -127,7 +130,7 @@ public class CartService {
 
     public Cart removeItem(Long userId, Long productId) {
         Cart cart = cartRepository.findByUserId(userId)
-                .orElseThrow(() -> new IllegalArgumentException("Cart not found for user: " + userId));
+                .orElseThrow(() -> new CartNotFoundException(userId));
         cart.getItems().removeIf(i -> i.getProductId().equals(productId));
         cart.recalculateTotals();
         Cart saved = cartRepository.save(cart);
