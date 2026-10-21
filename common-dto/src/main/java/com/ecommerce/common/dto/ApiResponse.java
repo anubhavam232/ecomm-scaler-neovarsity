@@ -1,6 +1,7 @@
 package com.ecommerce.common.dto;
 
 import java.time.Instant;
+import java.util.Map;
 
 public class ApiResponse<T> {
     private boolean success;
@@ -23,7 +24,7 @@ public class ApiResponse<T> {
         return new ApiResponse<>(true, message, data);
     }
 
-    public static <T> ApiResponse<T> error(String message) {
+    public static <T> ApiResponse<T> error(String message, Map<String, Object> errorDetails) {
         return new ApiResponse<>(false, message, null);
     }
 
