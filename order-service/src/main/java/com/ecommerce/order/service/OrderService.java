@@ -7,6 +7,7 @@ import com.ecommerce.common.events.PaymentCompletedEvent;
 import com.ecommerce.order.dto.OrderDtos.*;
 import com.ecommerce.order.entity.CustomerOrder;
 import com.ecommerce.order.entity.OrderItem;
+import com.ecommerce.order.exception.OrderNotFoundException;
 import com.ecommerce.order.repository.OrderRepository;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -125,7 +126,7 @@ public class OrderService {
     // PRD 4.1 Order Confirmation Details
     public CustomerOrder getOrderById(Long orderId) {
         return orderRepository.findById(orderId)
-                .orElseThrow(() -> new IllegalArgumentException("Order not found: " + orderId));
+                .orElseThrow(() -> new OrderNotFoundException(orderId));
     }
 
     // PRD 4.2 Order History
