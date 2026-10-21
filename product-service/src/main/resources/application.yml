@@ -1,0 +1,17 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: product-service
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/ecommerce_product_db?createDatabaseIfNotExist=true}
+    username: ${SPRING_DATASOURCE_USERNAME:ecommerce}
+    password: ${SPRING_DATASOURCE_PASSWORD:ecommerce_pass}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+  elasticsearch:
+    uris: ${SPRING_ELASTICSEARCH_URIS:http://localhost:9200}
